@@ -545,45 +545,95 @@ def open_HORIBAfile(
     return DataSE(data, name=name, reflect_delta=reflect_delta, **metadata)
 
 
-def open_M2000file(fname, dropdatapoints=1):
+def open_M2000file(fname, take_every=1, dropdatapoints=1):
     """
-    Open and load in an Accurion EP4 formmated data file.
-    Typically a .dat file.
+    Opens raw text files exported by Woolam's 'CompleteEASE' software.
 
-    Note: This file parser has been written for specific Accurion ellipsometers
-    EP3 and EP4. No work has been done to ensure it is compatible with all
-    Accurion ellipsometers. If you have trouble with this parser contact the
-    maintainers through github.
 
     Parameters
     ----------
     fname : file-handle or string
         File to load the dataset from.
 
-    reflect_delta : bool
-        Option to reflect delta around 180 degrees (as WVASE would).
+    dropdatapoints : int
+        Includes every nth element from the woolam dataset in DataSE.
+        Use to speed up fitting for datasets where a narrow wavelength
+        resolution is not required.
+
+    take_every : int
+        For time-resolved data sets only. Includes every nth dataset in
+        the returned dictionary. Usefully for reducing the number of data
+        points that needs to be processed when you don't need high temporaral
+        resolution
 
     Returns
     ----------
-    datasets : DataSE structure
-        Structure containing wavelength, angle of incidence, psi and delta.
+    datasets : DataSE structure or dict
+        If the file contains a single measurment, function returns
+        a single DataSE object containing wavelength, angle of
+        incidence, psi and delta.
+
+        If the file contains multiple measurements, such as a time-
+        series dataset, then it returns a dictionary containing
+        DataSE objects for each measurement point. The Dictionary
+        keys correspond to the measurement details (e.g., time in seconds).
+
+        Metadata contained within the file is stored in DataSE.metadata.
     """
 
-    data = []
+    mode = None
+    metadata = {}
 
     with open(fname, mode="r") as file:
-        __ = file.readline()
-        meas_info = file.readline()
-        __ = file.readline()
+        file.readline()  # Skip the blank first line
+        firstline = file.readline()[:-1]
+        secondline = file.readline()[:-1]
+
+        if secondline == "nm":
+            mode = "single"
+            skiplines = 3
+        elif secondline == "Dynamic":
+            mode = "dynamic"
+            skiplines = 4
+        else:
+            raise ValueError(
+                "Currently, only single and time-series datasets can be read"
+            )
+
+    header = firstline[len("VASEmethod[") : -len("]")]
+    for ele in header.split(", "):
+        key, val = ele.split("=")
+        metadata[key] = val
+
+    if mode == "single":
+        return _open_M2000file_standard(
+            fname=fname,
+            dropdatapoints=dropdatapoints,
+            skiplines=skiplines,
+            metadata=metadata,
+        )
+    elif mode == "dynamic":
+        return _open_M2000file_kinetic(
+            fname=fname,
+            take_every=take_every,
+            dropdatapoints=dropdatapoints,
+            skiplines=skiplines,
+            metadata=metadata,
+        )
+
+
+def _open_M2000file_standard(fname, dropdatapoints=1, metadata={}, skiplines=3):
+    data = []
+    with open(fname, mode="r") as file:
+        for i in range(skiplines):
+            file.readline()
 
         count = 0
         while True:
             data_row = []
 
             count += 1
-            # print (count)
 
-            # Get next line from file
             line = file.readline().split("\t")
             if not line:
                 break
@@ -610,13 +660,18 @@ def open_M2000file(fname, dropdatapoints=1):
 
     data = np.array(data)
     data = data[::dropdatapoints]
-    return DataSE(data[:, [0, 1, 2, 3]].T)
+    return DataSE(data[:, [0, 1, 2, 3]].T, **metadata)
 
 
-def open_woolam_time_series(fname, take_every=1):
+def _open_M2000file_kinetic(
+    fname, take_every=1, dropdatapoints=1, skiplines=4, metadata={}
+):
+    """
+    time in seconds
+    """
     df = pd.read_csv(
         fname,
-        skiprows=4,
+        skiprows=skiplines,
         sep="\t",
         names=[
             "Wavelength, nm",
@@ -641,13 +696,37 @@ def open_woolam_time_series(fname, take_every=1):
                         subdf["Psi"],
                         subdf["Delta"],
                     ]
-                )[:, ::5]
+                )[:, ::dropdatapoints],
+                **metadata,
             )
 
     return time_dict
 
 
 def open_FilmSenseFile(fname):
+    """
+    Opens text files exported from FilmSense ellipsometers.
+
+
+    Parameters
+    ----------
+    fname : file-handle or string
+        File to load the dataset from.
+
+    Returns
+    ----------
+    datasets : DataSE structure or dict
+        If the file contains a single measurment, function returns
+        a single DataSE object containing wavelength, angle of
+        incidence, psi and delta.
+
+        If the file contains multiple measurements, such as a time-
+        series dataset, then it returns a dictionary containing
+        DataSE objects for each measurement point. The Dictionary
+        keys correspond to the measurement details (e.g., time).
+
+        Metadata contained within the file is stored in DataSE.metadata.
+    """
     with open(fname, "r") as f:
         header = f.readline()
         if header == "Film_Sense_Data\n":
@@ -681,6 +760,11 @@ def _parse_FilmSenseFileHeader(firstline, mode="standard"):
 
 
 def _open_FilmSenseFile_standard(f):
+    """
+    Opens a single measurement captured by FS series
+    ellipsometers from filmsense. This function is designed to be
+    called by open_FilmSenseFile.
+    """
     metadata = _parse_FilmSenseFileHeader(f.readline())
 
     # Note - in the documentation the first numwvls lines are only supposed
@@ -707,18 +791,18 @@ def _open_FilmSenseFile_standard(f):
 
     for i in range(metadata["numwvls"]):
         line = f.readline().split("\t")
-        df.iloc[i]["Wavelength"] = float(line[0])
-        df.iloc[i]["led_Br"] = float(line[1])
-        df.iloc[i]["led_ExpL"] = float(line[2])
-        df.iloc[i]["led_ExpR"] = float(line[3])
+        df.loc[i + 1, "Wavelength"] = float(line[0])
+        df.loc[i + 1, "led_Br"] = float(line[1])
+        df.loc[i + 1, "led_ExpL"] = float(line[2])
+        df.loc[i + 1, "led_ExpR"] = float(line[3])
 
     for i in range(metadata["numwvls"]):
         line = f.readline().split("\t")
-        df.iloc[i]["N"] = float(line[0])
-        df.iloc[i]["C"] = float(line[1])
-        df.iloc[i]["S"] = float(line[2])
-        df.iloc[i]["P"] = float(line[3])
-        df.iloc[i]["Intensity"] = float(line[4])
+        df.loc[i + 1, "N"] = float(line[0])
+        df.loc[i + 1, "C"] = float(line[1])
+        df.loc[i + 1, "S"] = float(line[2])
+        df.loc[i + 1, "P"] = float(line[3])
+        df.loc[i + 1, "Intensity"] = float(line[4])
 
     S = np.array(df["S"], dtype=np.float32)
     N = np.array(df["N"], dtype=np.float32)
@@ -737,10 +821,15 @@ def _open_FilmSenseFile_standard(f):
     AOI = np.ones_like(Psi) * metadata["nomAOI"]
     Wvl = np.array(df["Wavelength"]).astype(np.float64)
 
-    return DataSE(data=[Wvl, AOI, Psi, Delta], reflect_delta=False)
+    return DataSE(data=[Wvl, AOI, Psi, Delta], reflect_delta=False, **metadata)
 
 
 def _open_FilmSenseFile_dynamic(f):
+    """
+    Opens dynamic (time resolved) data captured by FS series
+    ellipsometers from filmsense. This function is designed to be
+    called by open_FilmSenseFile.
+    """
     metadata = _parse_FilmSenseFileHeader(f.readline(), mode="dynamic")
 
     base_df = pd.DataFrame(
@@ -764,12 +853,12 @@ def _open_FilmSenseFile_dynamic(f):
 
     for i in range(metadata["numwvls"]):
         line = f.readline().split("\t")
-        base_df.iloc[i]["Wavelength"] = float(line[0])
-        base_df.iloc[i]["led_Br"] = float(line[1])
-        base_df.iloc[i]["led_ExpL"] = float(line[2])
-        base_df.iloc[i]["led_ExpR"] = float(line[3])
+        base_df.loc[i + 1, "Wavelength"] = float(line[0])
+        base_df.loc[i + 1, "led_Br"] = float(line[1])
+        base_df.loc[i + 1, "led_ExpL"] = float(line[2])
+        base_df.loc[i + 1, "led_ExpR"] = float(line[3])
 
-    dataheader = f.readline().split("\t")
+    f.readline()  # read header
 
     time_series = {}
     for i in range(metadata["numdatasets"]):
@@ -780,11 +869,11 @@ def _open_FilmSenseFile_dynamic(f):
 
         for j in range(metadata["numwvls"]):
             J = j * 5
-            df.iloc[j]["N"] = float(line[J + 1])
-            df.iloc[j]["C"] = float(line[J + 2])
-            df.iloc[j]["S"] = float(line[J + 3])
-            df.iloc[j]["P"] = float(line[J + 4])
-            df.iloc[j]["Intensity"] = float(line[J + 5])
+            df.loc[j + 1, "N"] = float(line[J + 1])
+            df.loc[j + 1, "C"] = float(line[J + 2])
+            df.loc[j + 1, "S"] = float(line[J + 3])
+            df.loc[j + 1, "P"] = float(line[J + 4])
+            df.loc[j + 1, "Intensity"] = float(line[J + 5])
 
         S = np.array(df["S"], dtype=np.float32)
         N = np.array(df["N"], dtype=np.float32)
@@ -800,7 +889,7 @@ def _open_FilmSenseFile_dynamic(f):
         Wvl = np.array(df["Wavelength"]).astype(np.float64)
 
         time_series[time] = DataSE(
-            data=[Wvl, AOI, Psi, Delta], reflect_delta=False
+            data=[Wvl, AOI, Psi, Delta], reflect_delta=False, **metadata
         )
 
     return time_series
